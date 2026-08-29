@@ -1,32 +1,32 @@
 // Audio playback hook using expo-audio.
-// Receives Opus-encoded ArrayBuffers and plays them in streaming fashion.
-// Since expo-audio doesn't support raw Opus frame playback directly,
-// we accumulate frames and play them as chunks via a data URI or file.
+// Receives PCM 16-bit, 16kHz ArrayBuffers from Sincro Worker and plays them.
 
 import { AudioPlayer, createAudioPlayer } from "expo-audio";
 import { useCallback, useEffect, useRef } from "react";
 
-// Simple Opus frame queue player.
-// Accumulates Opus frames and plays them periodically.
-// In a production app, you'd use a proper Opus decoder (native module).
-// For the prototype, we use a workaround: write to a temp file and play it.
-
 export function useAudioPlayback() {
   const playerRef = useRef<AudioPlayer | null>(null);
+  const playerValidRef = useRef(true);
   const queueRef = useRef<ArrayBuffer[]>([]);
   const playingRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     playerRef.current = createAudioPlayer(null);
+    playerValidRef.current = true;
     return () => {
-      playerRef.current?.release();
+      playerValidRef.current = false;
       if (timerRef.current) clearInterval(timerRef.current);
+      try {
+        playerRef.current?.release();
+      } catch (e) {
+        // Player may already be released
+      }
     };
   }, []);
 
-  const enqueueFrame = useCallback((opusFrame: ArrayBuffer) => {
-    queueRef.current.push(opusFrame);
+  const enqueueFrame = useCallback((pcmFrame: ArrayBuffer) => {
+    queueRef.current.push(pcmFrame);
     if (!playingRef.current) {
       playNextChunk();
     }
@@ -39,25 +39,13 @@ export function useAudioPlayback() {
     }
     playingRef.current = true;
 
-    // Concatenate all queued frames into one buffer
     const frames = queueRef.current.splice(0);
     const totalLength = frames.reduce((acc, f) => acc + f.byteLength, 0);
-    const combined = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const f of frames) {
-      combined.set(new Uint8Array(f), offset);
-      offset += f.byteLength;
-    }
 
-    // Write to a blob and play via data URI
-    // Note: This is a prototype workaround. Real Opus playback needs a native decoder.
-    // The Python service should ideally send PCM or AAC if Opus decode isn't available.
-    // For now, we skip actual playback and just log — the real playback depends on
-    // the translation service's output format.
     console.log(
       "[AudioPlayback] Received",
       frames.length,
-      "Opus frames, total bytes:",
+      "PCM frames, total bytes:",
       totalLength,
     );
 
@@ -72,7 +60,14 @@ export function useAudioPlayback() {
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
-    playerRef.current?.pause();
+    if (playerValidRef.current && playerRef.current) {
+      try {
+        playerRef.current.pause();
+      } catch (e) {
+        // Player may already be released — ignore
+        console.warn("[AudioPlayback] Player already released:", e);
+      }
+    }
   }, []);
 
   return { enqueueFrame, stopPlayback };

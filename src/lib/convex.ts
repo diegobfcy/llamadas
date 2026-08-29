@@ -2,8 +2,8 @@
 // Assumes the Convex backend already has these mutations/queries defined.
 // If the generated file doesn't exist yet, run `npx convex dev` to generate it.
 
-import { api } from "@/convex/_generated/api";
 import { ConvexReactClient } from "convex/react";
+import { api } from "../../convex/_generated/api";
 
 let _client: ConvexReactClient | null = null;
 

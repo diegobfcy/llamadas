@@ -70,6 +70,12 @@ export function useAddUtterance() {
   return useMutation(api.utterances.add);
 }
 
+// ── Sincro session (stored in calls) ──
+
+export function useSaveSincroSession() {
+  return useMutation(api.calls.saveSincroSession);
+}
+
 // ── User management ──
 
 export function useUpsertUser() {

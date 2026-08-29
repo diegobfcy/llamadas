@@ -1,4 +1,4 @@
-// Active call screen — handles WebSocket audio streaming, subtitles, and hangup.
+// Active call screen — uses Sincro Dispatcher + Worker for real-time audio translation.
 
 import { useAudioCapture } from "@/hooks/useAudioCapture";
 import { useAudioPlayback } from "@/hooks/useAudioPlayback";
@@ -10,7 +10,8 @@ import {
     useUserByClerkId,
     useUtterancesByCall,
 } from "@/hooks/useConvex";
-import { TranslationMessage, TranslationWebSocket } from "@/lib/translation-ws";
+import { createSession, deleteSession } from "@/lib/dispatcher";
+import { SincroWorkerSocket } from "@/lib/translation-ws";
 import { useUser } from "@clerk/expo";
 import type { Id } from "convex/_generated/dataModel";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -44,76 +45,130 @@ export default function CallScreen() {
     (p: any) => p.userId === myUser?._id,
   );
 
-  const [isConnected, setIsConnected] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<
+    "idle" | "connecting" | "waiting_peer" | "connected" | "disconnected"
+  >("idle");
   const [subtitles, setSubtitles] = useState<
     { id: string; text: string; isMine: boolean }[]
   >([]);
 
-  const wsRef = useRef<TranslationWebSocket | null>(null);
+  const wsRef = useRef<SincroWorkerSocket | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
 
-  // Audio capture
+  // Audio capture — sends PCM to Worker
   const { startCapture, stopCapture } = useAudioCapture((buffer) => {
-    // Send PCM buffer to WebSocket (the Python service handles Opus encoding)
     if (wsRef.current && buffer.data) {
       wsRef.current.sendAudio(buffer.data);
     }
   });
 
-  // Audio playback
+  // Audio playback — receives PCM from Worker
   const { enqueueFrame, stopPlayback } = useAudioPlayback();
 
-  // Connect WebSocket when call is active
+  // Connect to Sincro when call is active
   useEffect(() => {
-    if (!call || call.status !== "active" || !myParticipant) return;
+    if (!call || call.status !== "active" || !myParticipant || !participants)
+      return;
 
-    const ws = new TranslationWebSocket(
-      callId,
-      myParticipant._id,
-      myParticipant.lang,
-      {
-        onControl: (msg: TranslationMessage) => {
-          // Persist utterance to Convex
-          addUtterance({
-            callId,
-            speakerId: msg.speakerId as Id<"participants">,
-            sourceLang: msg.sourceLang,
-            targetLang: msg.targetLang,
-            sourceText: msg.sourceText,
-            translatedText: msg.translatedText,
-            isFinal: msg.isFinal,
-          }).catch(console.error);
-
-          // Show subtitle
-          setSubtitles((prev) => [
-            ...prev,
-            {
-              id: `${Date.now()}-${Math.random()}`,
-              text: msg.translatedText || msg.sourceText,
-              isMine: msg.speakerId === myParticipant._id,
-            },
-          ]);
-        },
-        onAudio: (opusFrame: ArrayBuffer) => {
-          enqueueFrame(opusFrame);
-        },
-        onClose: () => setIsConnected(false),
-        onError: () => setIsConnected(false),
-      },
+    const otherParticipant = participants.find(
+      (p: any) => p.userId !== myUser?._id,
     );
+    if (!otherParticipant) return;
 
-    ws.connect();
-    wsRef.current = ws;
-    setIsConnected(true);
+    let cancelled = false;
 
-    // Start capturing microphone
-    startCapture().catch(console.error);
+    async function setupSincro() {
+      try {
+        setConnectionStatus("connecting");
+
+        const myLang = myParticipant!.lang || "es";
+        const otherLang = otherParticipant!.lang || "en";
+
+        console.log("[CallScreen] Creating session:", {
+          myId: myParticipant!._id,
+          otherId: otherParticipant!._id,
+          myLang,
+          otherLang,
+          myParticipant: JSON.stringify(myParticipant),
+          otherParticipant: JSON.stringify(otherParticipant),
+        });
+
+        // 1. Create session via Dispatcher
+        const session = await createSession({
+          user_a_id: myParticipant!._id,
+          user_b_id: otherParticipant!._id,
+          src_lang: myLang,
+          dst_lang: otherLang,
+        });
+
+        console.log("[CallScreen] Session created:", JSON.stringify(session));
+
+        if (cancelled) {
+          // Clean up session if component unmounted during setup
+          deleteSession(session.session_id).catch(() => {});
+          return;
+        }
+
+        sessionIdRef.current = session.session_id;
+
+        // Tokens are keyed by participant ID
+        const myToken = session.tokens[myParticipant!._id];
+        if (!myToken) {
+          throw new Error(
+            `No token found for participant ${myParticipant!._id}. Available: ${Object.keys(session.tokens).join(", ")}`,
+          );
+        }
+
+        console.log("[CallScreen] My token:", myToken.substring(0, 30) + "...");
+        console.log("[CallScreen] Worker URL:", session.ws_url);
+
+        // 2. Connect to Worker via WebSocket (awaits /readyz first)
+        const ws = new SincroWorkerSocket(myToken, session.ws_url, {
+          onAudio: (pcmFrame: ArrayBuffer) => {
+            enqueueFrame(pcmFrame);
+          },
+          onStatus: (status) => {
+            setConnectionStatus(status);
+          },
+          onError: () => {
+            setConnectionStatus("disconnected");
+          },
+        });
+
+        await ws.connect();
+        wsRef.current = ws;
+
+        // 3. Start capturing microphone
+        await startCapture();
+      } catch (e) {
+        console.error("[CallScreen] Failed to setup Sincro:", e);
+        if (!cancelled) {
+          setConnectionStatus("disconnected");
+          Alert.alert(
+            "Connection Error",
+            "Failed to connect to translation service.",
+          );
+        }
+      }
+    }
+
+    setupSincro();
 
     return () => {
-      ws.disconnect();
+      cancelled = true;
+      wsRef.current?.disconnect();
       stopCapture();
       stopPlayback();
+
+      // Clean up session on Dispatcher
+      if (sessionIdRef.current) {
+        deleteSession(sessionIdRef.current).catch((e) =>
+          console.warn("[CallScreen] Failed to delete session:", e),
+        );
+        sessionIdRef.current = null;
+      }
     };
-  }, [call?.status, myParticipant?._id]);
+  }, [call?.status, myParticipant?._id, participants?.length]);
 
   // Handle hangup
   const handleHangup = useCallback(async () => {
@@ -122,9 +177,16 @@ export default function CallScreen() {
     } catch (e) {
       console.error("Failed to end call:", e);
     }
+
     wsRef.current?.disconnect();
     stopCapture();
     stopPlayback();
+
+    if (sessionIdRef.current) {
+      deleteSession(sessionIdRef.current).catch(() => {});
+      sessionIdRef.current = null;
+    }
+
     router.back();
   }, [callId, endCall, stopCapture, stopPlayback, router]);
 
@@ -136,6 +198,14 @@ export default function CallScreen() {
       ]);
     }
   }, [call?.status]);
+
+  const statusLabel: Record<string, string> = {
+    idle: "Ready",
+    connecting: "🔵 Connecting...",
+    waiting_peer: "🟡 Waiting for peer...",
+    connected: "🟢 Connected",
+    disconnected: "🔴 Disconnected",
+  };
 
   if (!call || call.status === "ended") {
     return (
@@ -168,7 +238,7 @@ export default function CallScreen() {
           Call with {otherParticipant?.displayName ?? "Unknown"}
         </Text>
         <Text style={styles.connectionStatus}>
-          {isConnected ? "🟢 Connected" : "🔴 Connecting..."}
+          {statusLabel[connectionStatus] || connectionStatus}
         </Text>
       </View>
 

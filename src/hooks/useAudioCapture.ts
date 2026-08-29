@@ -1,6 +1,6 @@
 // Audio capture hook using expo-audio AudioStream.
-// Captures PCM from the microphone and provides it as ArrayBuffers.
-// The caller is responsible for Opus encoding before sending over WebSocket.
+// Captures PCM 16-bit, 16kHz, mono from the microphone.
+// Sends raw PCM frames (640 bytes = 20ms) to the Sincro Worker via WebSocket.
 
 import {
     AudioStreamBuffer,
@@ -23,9 +23,12 @@ export function useAudioCapture(
   const onBufferRef = useRef(onBuffer);
   onBufferRef.current = onBuffer;
 
+  // Track whether the stream is still valid to avoid calling stop() on a released stream
+  const streamValidRef = useRef(true);
+
   const { stream } = useAudioStream({
     channels: 1,
-    sampleRate: 48000,
+    sampleRate: 16000, // Sincro Worker expects 16kHz
     encoding: "int16",
     onBuffer: (buf: AudioStreamBuffer) => {
       onBufferRef.current(buf);
@@ -37,19 +40,35 @@ export function useAudioCapture(
     if (!perm.granted) {
       throw new Error("Microphone permission denied");
     }
+    streamValidRef.current = true;
     await stream.start();
     setIsStreaming(true);
   }, [stream]);
 
   const stopCapture = useCallback(() => {
-    stream.stop();
+    if (streamValidRef.current) {
+      try {
+        stream.stop();
+      } catch (e) {
+        // Stream may have already been released — ignore
+        console.warn("[AudioCapture] Stream already released:", e);
+      }
+      streamValidRef.current = false;
+    }
     setIsStreaming(false);
   }, [stream]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stream.stop();
+      if (streamValidRef.current) {
+        try {
+          stream.stop();
+        } catch (e) {
+          // Ignore — stream already released
+        }
+        streamValidRef.current = false;
+      }
     };
   }, [stream]);
 

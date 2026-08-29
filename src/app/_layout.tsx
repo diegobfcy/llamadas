@@ -7,11 +7,11 @@ import { Stack } from "expo-router";
 
 const convex = getConvexClient();
 
-if (!ENV.CLERK_PUBLISHABLE_KEY) {
-  throw new Error("Missing EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY in .env");
-}
-
 export default function RootLayout() {
+  if (!ENV.CLERK_PUBLISHABLE_KEY) {
+    throw new Error("Missing EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY in .env");
+  }
+
   return (
     <ClerkProvider
       publishableKey={ENV.CLERK_PUBLISHABLE_KEY}
