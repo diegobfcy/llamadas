@@ -1,18 +1,28 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
-import * as SplashScreen from 'expo-splash-screen';
-import { useColorScheme } from 'react-native';
+import { getConvexClient } from "@/lib/convex";
+import { ENV } from "@/lib/env";
+import { ClerkProvider } from "@clerk/expo";
+import { tokenCache } from "@clerk/expo/token-cache";
+import { ConvexProvider } from "convex/react";
+import { Stack } from "expo-router";
 
-import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import AppTabs from '@/components/app-tabs';
+const convex = getConvexClient();
 
-SplashScreen.preventAutoHideAsync();
+if (!ENV.CLERK_PUBLISHABLE_KEY) {
+  throw new Error("Missing EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY in .env");
+}
 
-export default function TabLayout() {
-  const colorScheme = useColorScheme();
+export default function RootLayout() {
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
-    </ThemeProvider>
+    <ClerkProvider
+      publishableKey={ENV.CLERK_PUBLISHABLE_KEY}
+      tokenCache={tokenCache}
+    >
+      <ConvexProvider client={convex}>
+        <Stack screenOptions={{ headerShown: false }}>
+          <Stack.Screen name="index" />
+          <Stack.Screen name="call/[id]" options={{ presentation: "modal" }} />
+        </Stack>
+      </ConvexProvider>
+    </ClerkProvider>
   );
 }
